@@ -134,7 +134,12 @@ async function buscarCrossRef(queryEn: string, maxRes = 4): Promise<FuenteCienti
       const titulo = (item.title || ["Sin título"])[0];
       const resumenRaw: string = item.abstract || "";
       const resumen = resumenRaw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      const urlReal = item.URL || (item.DOI ? `https://doi.org/${item.DOI}` : ""); const revista = (item["container-title"] \vert{}\vert{} ["Revista Indexada CrossRef"])[0];  if (resumen.length > 100 && urlReal) { fuentes.push({ origen: `CrossRef \vert{} ${revista}`,
+      const urlReal = item.URL || (item.DOI ? `https://doi.org/${item.DOI}` : "");
+      const revista = (item["container-title"] || ["Revista Indexada CrossRef"])[0];
+
+      if (resumen.length > 100 && urlReal) {
+        fuentes.push({
+          origen: `CrossRef | ${revista}`,
           titulo,
           url: urlReal,
           resumen: resumen.slice(0, 1800),
@@ -150,7 +155,51 @@ async function buscarCrossRef(queryEn: string, maxRes = 4): Promise<FuenteCienti
 async function buscarArxiv(queryEn: string, maxRes = 3): Promise<FuenteCientifica[]> {
   try {
     const q = encodeURIComponent(queryEn);
-    const url = `https://export.arxiv.org/api/query?search_query=ti:${q}+OR+abs:${q}&start=0&max_results=${maxRes}&sortBy=relevance`; const res = await fetch(url, { signal: AbortSignal.timeout(10000) }); const xml = await res.text(); const fuentes: FuenteCientifica[] = [];  const entries = xml.match(/<entry>([\s\S]*?)<\/entry>/g) \vert{}\vert{} []; for (const entry of entries) { const titulo = entry.match(/<title>([\s\S]*?)<\/title>/)?.[1]?.replace(/\s+/g, " ").trim() \vert{}\vert{} ""; const urlId = entry.match(/<id>([\s\S]*?)<\/id>/)?.[1]?.trim() \vert{}\vert{} ""; const summary = entry.match(/<summary>([\s\S]*?)<\/summary>/)?.[1]?.replace(/\s+/g, " ").trim() \vert{}\vert{} "";  if (titulo && urlId && summary) { fuentes.push({ origen: "Repositorio ArXiv", titulo, url: urlId, resumen: summary.slice(0, 1800), }); } } return fuentes; } catch { return []; } }  async function recopilarFuentesVariadas(queryEn: string) { const [f1, f2, f3, f4] = await Promise.all([ buscarOpenAlex(queryEn, 5), buscarSemanticScholar(queryEn, 5), buscarCrossRef(queryEn, 4), buscarArxiv(queryEn, 3), ]);  const todas = [...f1, ...f2, ...f3, ...f4]; const vistas = new Set<string>(); const fuentesUnicas: FuenteCientifica[] = []; let contextoTexto = "";  todas.forEach((f, idx) => { const clave = f.titulo.toLowerCase().trim().slice(0, 45); if (!vistas.has(clave)) { vistas.add(clave); fuentesUnicas.push(f); contextoTexto += `\n--- [Fuente ${idx + 1} | ${f.origen}] ---\nTítulo: ${f.titulo}\nURL: ${f.url}\nResumen:${f.resumen}\n`;
+    const url = `https://export.arxiv.org/api/query?search_query=ti:${q}+OR+abs:${q}&start=0&max_results=${maxRes}&sortBy=relevance`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+    const xml = await res.text();
+    const fuentes: FuenteCientifica[] = [];
+
+    const entries = xml.match(/<entry>([\s\S]*?)<\/entry>/g) || [];
+    for (const entry of entries) {
+      const titulo = entry.match(/<title>([\s\S]*?)<\/title>/)?.[1]?.replace(/\s+/g, " ").trim() || "";
+      const urlId = entry.match(/<id>([\s\S]*?)<\/id>/)?.[1]?.trim() || "";
+      const summary = entry.match(/<summary>([\s\S]*?)<\/summary>/)?.[1]?.replace(/\s+/g, " ").trim() || "";
+
+      if (titulo && urlId && summary) {
+        fuentes.push({
+          origen: "Repositorio ArXiv",
+          titulo,
+          url: urlId,
+          resumen: summary.slice(0, 1800),
+        });
+      }
+    }
+    return fuentes;
+  } catch {
+    return [];
+  }
+}
+
+async function recopilarFuentesVariadas(queryEn: string) {
+  const [f1, f2, f3, f4] = await Promise.all([
+    buscarOpenAlex(queryEn, 5),
+    buscarSemanticScholar(queryEn, 5),
+    buscarCrossRef(queryEn, 4),
+    buscarArxiv(queryEn, 3),
+  ]);
+
+  const todas = [...f1, ...f2, ...f3, ...f4];
+  const vistas = new Set<string>();
+  const fuentesUnicas: FuenteCientifica[] = [];
+  let contextoTexto = "";
+
+  todas.forEach((f, idx) => {
+    const clave = f.titulo.toLowerCase().trim().slice(0, 45);
+    if (!vistas.has(clave)) {
+      vistas.add(clave);
+      fuentesUnicas.push(f);
+      contextoTexto += `\n--- [Fuente ${idx + 1} | ${f.origen}] ---\nTítulo: ${f.titulo}\nURL: ${f.url}\nResumen: ${f.resumen}\n`;
     }
   });
 
@@ -183,4 +232,120 @@ async function llamarBloqueGroq(
       model: "openai/gpt-oss-120b",
       messages: [
         { role: "system", content: promptSistema },
-        { role: "user", content: `Tema del artículo: ${temaLimpio}\n\nBase bibliográfica recopilada:\n${contexto}
+        { role: "user", content: `Tema del artículo: ${temaLimpio}\n\nBase bibliográfica recopilada:\n${contexto}` },
+      ],
+      response_format: { type: "json_object" },
+      reasoning_effort: "low",
+      temperature: 0.1,
+      max_completion_tokens: 4500,
+    }),
+  });
+
+  const data = await res.json();
+  if (data.error) {
+    throw new Error(`Error Groq: ${data.error.message}`);
+  }
+  return JSON.parse(data.choices[0].message.content);
+}
+
+export async function POST(request: Request) {
+  try {
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "Falta configurar la variable de entorno GROQ_API_KEY en el servidor." },
+        { status: 500 }
+      );
+    }
+
+    const { prompt } = await request.json();
+    if (!prompt || typeof prompt !== "string" || !prompt.trim()) {
+      return NextResponse.json({ error: "Debes ingresar un tema de investigación." }, { status: 400 });
+    }
+
+    const { tema_limpio, keywords_en } = await interpretarPromptUsuario(prompt.trim(), apiKey);
+    const { contextoTexto, fuentesUnicas } = await recopilarFuentesVariadas(keywords_en);
+
+    if (fuentesUnicas.length === 0) {
+      return NextResponse.json(
+        { error: "No se encontraron fuentes académicas suficientes para este tema. Intenta reformular la consulta." },
+        { status: 404 }
+      );
+    }
+
+    const esquemaParte1 = `{
+      "TITULO": [{"texto": "Título académico completo y formal", "fuente_url": "URL principal"}],
+      "RESUMEN": [
+        {"texto": "Párrafo 1 (Contexto general, relevancia científica y objetivo de la revisión, ~130 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 2 (Enfoque metodológico de la revisión, síntesis de hallazgos y aportes, ~130 palabras)", "fuente_url": "URL"}
+      ],
+      "INTRODUCCION": [
+        {"texto": "Párrafo 1 (Antecedentes históricos y evolución conceptual del campo, ~140 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 2 (Estado actual, convergencia tecnológica y relevancia multidisciplinaria, ~140 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 3 (Brechas identificadas en la literatura y estructura del artículo, ~140 palabras)", "fuente_url": "URL"}
+      ],
+      "ESTADO_DEL_ARTE": [
+        {"texto": "Párrafo 1 (Primera corriente o enfoque predominante en la literatura revisada, ~140 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 2 (Segunda corriente o avances metodológicos complementarios, ~140 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 3 (Comparativa crítica y síntesis entre los distintos autores y estudios, ~140 palabras)", "fuente_url": "URL"}
+      ]
+    }`;
+
+    const esquemaParte2 = `{
+      "MARCO_TEORICO_Y_TECNOLOGIAS": [
+        {"texto": "Párrafo 1 (Fundamentos teóricos, modelos o arquitecturas centrales, ~140 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 2 (Infraestructura tecnológica, instrumentos, sensores o conjuntos de datos, ~140 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 3 (Procesamiento, integración sistémica y validación técnica, ~140 palabras)", "fuente_url": "URL"}
+      ],
+      "ANALISIS_Y_APLICACIONES": [
+        {"texto": "Párrafo 1 (Implementaciones prácticas y casos de uso documentados en las fuentes, ~140 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 2 (Impacto operativo, social o industrial reportado en la literatura, ~140 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 3 (Evaluación crítica del desempeño y factores condicionantes en entornos reales, ~140 palabras)", "fuente_url": "URL"}
+      ],
+      "LIMITACIONES_Y_DESAFIOS": [
+        {"texto": "Párrafo 1 (Barreras técnicas, metodológicas o de escalabilidad identificadas, ~130 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 2 (Desafíos éticos, regulatorios, económicos o de adopción humana, ~130 palabras)", "fuente_url": "URL"}
+      ],
+      "CONCLUSIONES": [
+        {"texto": "Párrafo 1 (Síntesis integral de los hallazgos y respuesta al objetivo del estudio, ~130 palabras)", "fuente_url": "URL"},
+        {"texto": "Párrafo 2 (Recomendaciones y líneas futuras de investigación científica, ~130 palabras)", "fuente_url": "URL"}
+      ]
+    }`;
+
+    const [parte1, parte2] = await Promise.all([
+      llamarBloqueGroq(tema_limpio, contextoTexto, esquemaParte1, apiKey),
+      llamarBloqueGroq(tema_limpio, contextoTexto, esquemaParte2, apiKey),
+    ]);
+
+    const articuloCompleto = { ...parte1, ...parte2 };
+    const filas = [];
+    let parrafoId = 0;
+    const urlFallback = fuentesUnicas[0].url;
+
+    for (const [seccion, itemsRaw] of Object.entries(articuloCompleto)) {
+      const items = Array.isArray(itemsRaw) ? itemsRaw : [itemsRaw];
+      for (const item of items) {
+        parrafoId += 1;
+        filas.push({
+          parrafo_id: parrafoId,
+          seccion,
+          texto: item?.texto || "",
+          fuente_url: item?.fuente_url || urlFallback,
+          aprobado: false,
+          estado_revision: "Pendiente de revisión",
+        });
+      }
+    }
+
+    return NextResponse.json({
+      tema_limpio,
+      keywords_en,
+      total_fuentes: fuentesUnicas.length,
+      fuentes: fuentesUnicas,
+      filas,
+    });
+  } catch (error: unknown) {
+    const mensaje = error instanceof Error ? error.message : "Error interno al generar el artículo";
+    return NextResponse.json({ error: mensaje }, { status: 500 });
+  }
+}
