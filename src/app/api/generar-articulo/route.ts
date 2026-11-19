@@ -106,7 +106,7 @@ async function buscarSemanticScholar(queryEn: string, maxRes = 5): Promise<Fuent
     for (const item of data.data || []) {
       if (item.abstract && item.url) {
         fuentes.push({
-          origen: `Semantic Scholar | ${item.venue \vert{}\vert{} "Semantic Scholar"} (${item.year || ""})`,
+          origen: `Semantic Scholar | ${item.venue || "Semantic Scholar"} (${item.year || ""})`,
           titulo: item.title || "",
           url: item.url,
           resumen: item.abstract.slice(0, 1800),
